@@ -1,0 +1,147 @@
+name: erp
+
+# 四个 Go 服务共用同一个镜像与构建参数，避免版本号在多处漂移
+x-backend-image: &backend-image
+  image: erp-backend:1.0.0
+
+# 生产环境给长驻服务加日志轮转，避免 json-file 无限增长
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
+services:
+  database:
+    image: postgres:17.9
+    restart: unless-stopped
+    logging: *default-logging
+    # 官方镜像收到 SIGINT 后需要时间做完检查点，10s 默认宽限期可能不够
+    stop_grace_period: 30s
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?请在 .env 中设置 POSTGRES_SUPERUSER_PASSWORD}
+      POSTGRES_DB: postgres
+      # 由 scripts/init.sql 读取，用于创建应用账号与迁移账号
+      ERP_APP_PASSWORD: ${ERP_APP_PASSWORD:?请在 .env 中设置 ERP_APP_PASSWORD}
+      ERP_MIGRATE_PASSWORD: ${ERP_MIGRATE_PASSWORD:?请在 .env 中设置 ERP_MIGRATE_PASSWORD}
+      # 官方镜像推荐把 PGDATA 放在挂载点的子目录，避免 bind mount 根目录下的杂项文件干扰 initdb
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - ./database/pgdata:/var/lib/postgresql/data
+      # 首次初始化脚本（仅在 pgdata 为空时执行一次）
+      - ./database/init:/docker-entrypoint-initdb.d:ro
+      - ./scripts/init.sql:/opt/init/init.sql:ro
+    healthcheck:
+      # 必须走 TCP：首次 initdb 期间的临时服务只监听 unix socket，
+      # 不加 -h 127.0.0.1 会在初始化未完成时就被判为 healthy
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    # 仅调试时可临时放开，生产不要暴露数据库端口：
+    # ports:
+    #   - "127.0.0.1:5432:5432"
+    networks:
+      - erp-net
+
+  main:
+    <<: *backend-image
+    restart: unless-stopped
+    logging: *default-logging
+    # distroless static-debian13:nonroot 的默认用户
+    user: "65532:65532"
+    # config.Load() 读取相对路径 config.json，工作目录必须是挂载点
+    working_dir: /app
+    volumes:
+      # 二进制在镜像内 /usr/local/bin；宿主机 config_app.json 挂载为容器内的 config.json
+      - ./main/config_app.json:/app/config.json:ro
+    expose:
+      - "8080"
+    depends_on:
+      database:
+        condition: service_healthy
+    # 镜像内没有 shell/curl；当前程序也没有 healthcheck 子命令或 /healthz，
+    # 因此暂不配置容器内健康检查。后端就绪情况请看：docker compose logs -f main
+    networks:
+      - erp-net
+
+  nginx:
+    image: nginx:1.30.6-trixie
+    restart: unless-stopped
+    logging: *default-logging
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/html:/usr/share/nginx/html:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+      # 不挂载 /var/log/nginx：官方镜像把日志软链到 stdout/stderr，
+      # 用 docker compose logs -f nginx 查看即可，挂载会覆盖软链
+    depends_on:
+      main:
+        condition: service_started
+    networks:
+      - erp-net
+
+  # ============ 一次性工具服务（profile: tools）============
+  # 运行方式：docker compose --profile tools run --rm <服务名>
+  # 执行完即退出，不会随 docker compose up -d 启动。
+
+  migrate:
+    <<: *backend-image
+    profiles: ["tools"]
+    entrypoint: ["/usr/local/bin/goose"]
+    command:
+      - "-dir"
+      - "/migrations"
+      - "postgres"
+      - "postgres://erp_migrate:${ERP_MIGRATE_PASSWORD:?请在 .env 中设置 ERP_MIGRATE_PASSWORD}@database:5432/erp_db?sslmode=disable"
+      - "up"
+    depends_on:
+      database:
+        condition: service_healthy
+    networks:
+      - erp-net
+
+  projection:
+    <<: *backend-image
+    profiles: ["tools"]
+    entrypoint: ["/usr/local/bin/erp-update-projection"]
+    working_dir: /app
+    volumes:
+      # 小程序路径统一用 config_migrate.json；该工具需要 erp_migrate（表 owner）才能 DROP 并重建投影表
+      - ./main/config_migrate.json:/app/config.json:ro
+    depends_on:
+      database:
+        condition: service_healthy
+    networks:
+      - erp-net
+
+  admin-init:
+    <<: *backend-image
+    profiles: ["tools"]
+    entrypoint: ["/usr/local/bin/erp-init-admin"]
+    working_dir: /app
+    # 初始管理员口令只从 TTY 读取；用 docker compose run 交互执行即可
+    # （run 默认分配 TTY 并保持 stdin，无需额外声明 tty/stdin_open）
+    # 创建管理员只需要业务表写权限，使用正常路径的 config_app.json（erp_app 账号）
+    volumes:
+      - ./main/config_app.json:/app/config.json:ro
+    depends_on:
+      database:
+        condition: service_healthy
+    networks:
+      - erp-net
+
+networks:
+  erp-net:
+    driver: bridge
+    ipam:
+      config:
+        # 固定子网：main/config_app.json 的 trusted_proxies 必须覆盖这个网段，
+        # 否则 gin 会把所有请求的来源 IP 记成 nginx 容器的地址。
+        # 与内网已有网段冲突时请同时修改这里和 config_app.json。
+        - subnet: 172.28.0.0/16

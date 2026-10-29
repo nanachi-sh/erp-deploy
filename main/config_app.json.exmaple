@@ -1,0 +1,23 @@
+{
+  "app_name": "default_erp",
+  "business_timezone": "Asia/Shanghai",
+  "process": {
+    "listen": "0.0.0.0",
+    "port": 8080,
+    "worker": {
+      "pool_size": 100,
+      "queue_size": 10
+    },
+    "secret": "请替换为 openssl rand -base64 32 的输出",
+    "trusted_proxies": [
+      "172.28.0.0/16"
+    ]
+  },
+  "postgre_sql": {
+    "addr": "database",
+    "port": 5432,
+    "username": "erp_app",
+    "password": "与 .env 的 ERP_APP_PASSWORD 一致",
+    "db_name": "erp_db"
+  }
+}

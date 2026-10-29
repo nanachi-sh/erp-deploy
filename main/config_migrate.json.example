@@ -1,0 +1,24 @@
+{
+  "app_name": "default_erp",
+  "business_timezone": "Asia/Shanghai",
+  "process": {
+    "listen": "127.0.0.1",
+    "port": 8080,
+    "worker": {
+      "pool_size": 100,
+      "queue_size": 10
+    },
+    "secret": "仅需非空，可填固定占位值（该工具不签发会话）",
+    "trusted_proxies": [
+      "127.0.0.1/32",
+      "::1/128"
+    ]
+  },
+  "postgre_sql": {
+    "addr": "database",
+    "port": 5432,
+    "username": "erp_migrate",
+    "password": "与 .env 的 ERP_MIGRATE_PASSWORD 一致",
+    "db_name": "erp_db"
+  }
+}
