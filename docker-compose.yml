@@ -2,7 +2,7 @@ name: erp
 
 # 四个 Go 服务共用同一个镜像与构建参数，避免版本号在多处漂移
 x-backend-image: &backend-image
-  image: erp-backend:1.0.0
+  image: erp-backend:1.0.1
 
 # 生产环境给长驻服务加日志轮转，避免 json-file 无限增长
 x-logging: &default-logging
