@@ -13,7 +13,7 @@ x-logging: &default-logging
 
 services:
   database:
-    image: postgres:17.11
+    image: postgres:17.12
     restart: unless-stopped
     logging: *default-logging
     # 官方镜像收到 SIGINT 后需要时间做完检查点，10s 默认宽限期可能不够
