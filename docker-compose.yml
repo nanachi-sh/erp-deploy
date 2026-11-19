@@ -68,7 +68,7 @@ services:
       - erp-net
 
   nginx:
-    image: nginx:1.30.6-trixie
+    image: nginx:1.30.7-trixie
     restart: unless-stopped
     logging: *default-logging
     ports:
